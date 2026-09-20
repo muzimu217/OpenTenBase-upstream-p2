@@ -19,7 +19,7 @@
 - 内置翻译、摘要、情感分析、问答抽取等常用场景函数
 - 类型化生成：`ai.generate_int / generate_double / generate_bool` 直接返回对应标量类型
 - 模型注册制管理：`ai_model_list` 表 + `ai.models` 视图，支持增删改查
-- 请求参数按 JSONB 深合并（`default_args || user_args`），调用时可按需覆盖默认参数
+- 请求参数按 JSONB 顶层浅合并（`default_args || user_args`，同名顶层键整体替换，不递归合并），调用时可按需覆盖默认参数
 - 模型登记表按 `DISTRIBUTE BY REPLICATION` 复制到各节点，CN/DN 上均可调用
 
 ## 前置依赖
@@ -91,7 +91,7 @@ SELECT ai.generate_text('用一句话介绍 OpenTenBase');
 | `model_name` | 模型名（主键），调用时的句柄 |
 | `request_type` / `uri` / `content_type` | HTTP 方法、端点 URL、请求体类型 |
 | `request_header` | `http_header[]` 请求头数组，通常存放 `Authorization` |
-| `default_args` | JSONB 默认请求参数，与调用参数深合并 |
+| `default_args` | JSONB 默认请求参数，与调用参数顶层浅合并（同名键整体替换） |
 | `json_path` | 结果提取模板：一条包含 `%s`（响应体）的 SQL 语句 |
 
 日常查看请使用 `ai.models` 视图，它不暴露 `request_header`：
@@ -169,7 +169,7 @@ SELECT ai.delete_model('deepseek-chat');
 加载要求：本扩展的 SQL 脚本中没有引用 C 模块的函数，`CREATE EXTENSION` 并不会加载 `ai.so`。要使用上述 GUC，需要显式加载模块：
 
 ```sql
-LOAD 'opentenbase_ai';
+LOAD 'ai';
 -- 或在 postgresql.conf 中配置后重启：
 -- shared_preload_libraries = 'opentenbase_ai'
 SET ai.completion_model = 'deepseek-chat';
@@ -218,7 +218,7 @@ make -C contrib/opentenbase_ai installcheck   # 需已启动并安装扩展的�
 
 ## 实现说明（面向内核开发者）
 
-- **调用链**：`ai.*` 高层函数 → 构造 `messages`/请求体 JSONB → `ai.invoke_model` → `default_args || user_args` 深合并 → 经 pgsql-http 的 `http()` 发起请求 → `EXECUTE format(json_path, response_content)` 提取 → 高层函数做类型清理后返回。
+- **调用链**：`ai.*` 高层函数 → 构造 `messages`/请求体 JSONB → `ai.invoke_model` → `default_args || user_args` 顶层浅合并 → 经 pgsql-http 的 `http()` 发起请求 → `EXECUTE format(json_path, response_content)` 提取 → 高层函数做类型清理后返回。
 - **`json_path` 是 SQL 模板**而非 JSON Path 表达式：登记时写入一条含 `%s` 的 `SELECT ...` 语句，运行时以响应体文本替换后 `EXECUTE`，因此提取逻辑可以是任意 SQL 表达式。
 - **GUC 加载语义**：三个 GUC 在 `ai.c` 的 `_PG_init` 中以 `PGC_USERSET` 定义；`ai.so` 仅在 `LOAD` 或 `shared_preload_libraries` 时加载（见"GUC 参数"小节）。高层函数通过 `current_setting('...', true)` 读取，未设置时以 "model name is not set" 异常提示。
 - **分发策略**：`ai_model_list` 为 `DISTRIBUTE BY REPLICATION` 复制表，保证所有节点的模型登记一致；实际 HTTP 调用发生在执行该查询的节点上。
